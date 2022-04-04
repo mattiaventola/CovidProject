@@ -7,4 +7,5 @@ https://htmlpreview.github.io/?https://github.com/mattiaventola/CovidProject/blo
 This project aims to predict the number of death in Lombardy for the first quarter of 2020
 
 For the analysis, have been used data from the ISTAT dataset.
+
 Graphics are done using Tableau
