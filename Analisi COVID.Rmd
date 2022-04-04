@@ -1,0 +1,791 @@
+---
+title: "Analisi COVID"
+author: "Alessandro Citino, Alessandro Motta, Mattia Ventola"
+date: "3/5/2020"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Abstract
+
+L'obiettivo di questa analisi è stimare l'incremento di decessi nel primo triennio del 2020 nella regione Lombardia, rispetto alla media dei decessi negli stessi mesi tra il 2015 e il 2019. Tale cifra è stata stimata basandosi sui dati di 1120 comuni lombardi selezionati da ISTAT seguendo determinati criteri, specificati di seguito.
+
+\begin{itemize}
+\item Appartenenza all'ANPR;
+\item Incremento di decessi nel mese di marzo maggiore del 20% rispetto alla media dei 5 anni precedenti;
+\item Almeno 10 decessi nei primi tre mesi del 2020;
+\item Dati 2020 ritenuti affidabili dall'ISTAT.
+\end{itemize}
+
+Dunque, i comuni risultano divisi in tre sotto-gruppi:
+
+\begin{itemize}
+\item "Comuni noANPR": comuni non iscritti all'ANPR 
+\item "Comuni ignoti": comuni iscritti all'ANPR ma che non soddisfano almeno uno degli altri criteri elencati precedentemente
+\item "Comuni noti": comuni iscritti all'ANPR e con dati relativi al 2020 disponibili
+\end{itemize}
+
+#########################
+GRAFICO TRE SOTTOGRUPPI
+
+```{r}
+library(ggplot2)
+library(scales)
+
+denom=nrow(comuni_noti2020)+nrow(comuni_ignoti)+nrow(comuni_noANPR)
+
+Tipologia_di_Comuni <- c(rep("Noti",3))
+
+valori <- c(nrow(comuni_noti2020)*100/denom,nrow(comuni_ignoti)*100/denom,nrow(comuni_noANPR)*100/denom)
+
+Tipologia_comuni <- c("Noti" , "Ignoti" , "no ANPR")
+
+data0 <- data.frame(Tipologia_comuni,valori)
+
+bp<-ggplot(data0, aes(fill=Tipologia_comuni,x="", y=valori)) +  
+    geom_bar(width=1, stat="identity") +
+  ggtitle("Distribuzione Comuni")
+#+ggsave("Nuovo grafico.pdf")
+
+
+pie <- bp + coord_polar("y", start=0)
+
+blank_theme <- theme_minimal()+
+  theme(
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  panel.border = element_blank(),
+  panel.grid=element_blank(),
+  axis.ticks = element_blank(),
+  plot.title=element_text(size=14, face="bold")
+  )
+
+pie + scale_fill_brewer("Comuni") + blank_theme +
+  theme(axis.text.x=element_blank())+
+  geom_text(aes(y = valori/3 + c(0, cumsum(valori)[-length(valori)]), 
+                label = percent(valori/100)), size=5)
+```
+
+
+
+
+# Lettura e suddivisione dataset
+
+Per la nostra analisi abbiamo utilizzato i seguenti dataset:
+
+\begin{itemize}
+\item comune_giorno.csv, contenente i decessi giorno per giorno nel primo trimestre degli anni 2015-2020;
+\item Popolazione_comuni_italiani.csv, contenente i dati sulla popolazione dei comuni italiano nel 2019;
+\item Comuni_ANPR.xlsx, lista dei comuni italiani iscritti all'ANPR;
+\item italy_geo.xlsx, relativo alla posizione geografica dei comuni italiani.
+\end{itemize}
+
+
+
+```{r}
+library(readr)
+library(readxl)
+library(lubridate)
+library(stringi)
+library(geosphere)
+library(tidyr)
+library(dplyr)
+library(data.table)
+library(microbenchmark)
+library(ggplot2)
+
+comune_giorno <- read_csv("dati-giornalieri-comune/comune_giorno.csv",
+                          locale = locale(encoding = "ISO-8859-1"))
+
+popolazione_comuni_italiani <- read_csv("Popolazione_comuni_italiani.csv")
+
+comuni_ANPR <- read_excel("Comuni_ANPR.xlsx")
+
+italy_geo <- suppressWarnings(read_excel("italy_geo.xlsx", 
+    sheet = "italy_geo", col_types = c("numeric", 
+        "text", "numeric", "numeric")))
+dataset_aggiornato <- read_excel("Dati_aggiornati.xlsx", 
+    sheet = "Totale per periodo", col_types = c("text", 
+        "text", "text", "text", "text", "text", 
+        "skip", "skip", "skip", "numeric", 
+        "numeric", "numeric", "skip", "skip", 
+        "skip"), skip = 1)
+```
+
+```{r include=F}
+unique(comune_giorno['DATA_INIZIO_DIFF'])
+
+# I comuni != 'Dati 2020 n.d.' sono i 1689
+#prova <- select(filter(comune_giorno, DATA_INIZIO_DIFF != "Dati 2020 n.d."), c(1:27))
+#prova %>% gather(key = "SESSO_ANNO", value = "DECESSI", MASCHI_15:TOTALE_20) -> prova2
+#prova2 %>% group_by(NOME_COMUNE) %>%  # raggruppo
+#  summarise(DECESSI = sum(DECESSI)) -> prova3
+```
+
+Selezione Lombardia:
+
+```{r}
+Lombardia <- select(filter(comune_giorno, NOME_REGIONE == "Lombardia"),
+                    c(1:27))
+```
+```{r,include=F}
+(unique(Lombardia['NOME_COMUNE']))
+```
+
+```{r}
+italy_geo <- mutate(italy_geo, comune = stri_trans_tolower(comune))[c(2:4)]
+Lombardia <- mutate(Lombardia, NOME_COMUNE = stri_trans_tolower(NOME_COMUNE))
+```
+
+È stato necessario aggiungere al dataset delle posizioni i comuni che risultavano essere chiamati in maniera differente nei dataset (a causa di fusioni oppure modifiche di nome nel corso degli anni):
+
+```{r}
+# noANPR
+
+# Cadrezzate con Osmate
+Cadrezzate_con_Osmate <- data.frame(comune = "cadrezzate con osmate", lng = 8.6444, lat = 45.8002)
+italy_geo <- rbind(italy_geo, Cadrezzate_con_Osmate)
+
+# Solbiate con Cagno
+Solbiate_con_Cagno <- data.frame(comune = "solbiate con cagno", lng = 8.9342, lat = 45.7906)
+italy_geo <- rbind(italy_geo, Solbiate_con_Cagno)
+
+# Vermezzo con Zelo
+Vermezzo_con_Zelo <- data.frame(comune = "vermezzo con zelo", lng = 8.9801, lat = 45.3972)
+italy_geo <- rbind(italy_geo, Vermezzo_con_Zelo)
+
+# Puegnago del Garda
+italy_geo[italy_geo == "puegnago sul garda"] <- "puegnago del garda"
+
+# Colli Verdi
+Colli_Verdi <- data.frame(comune = "colli verdi", lng = 9.2741, lat = 44.9290)
+italy_geo <- rbind(italy_geo, Colli_Verdi)
+
+# Valvarrone
+Valvarrone <- data.frame(comune = "valvarrone", lng = 9.3259, lat = 46.0842)
+italy_geo <- rbind(italy_geo, Valvarrone)
+
+
+
+# noti
+
+# San Giorgio Bigarello
+italy_geo[italy_geo == "san giorgio di mantova"] <- "san giorgio bigarello"
+
+# Borgo Mantovano
+Borgo_Mantovano <- data.frame(comune = "borgo mantovano", lng = 11.1323, lat = 45.0544)
+italy_geo <- rbind(italy_geo, Borgo_Mantovano)
+
+# Borgocarbonara
+Borgocarbonara <- data.frame(comune = "borgocarbonara", lng = 11.2338, lat = 45.0375)
+italy_geo <- rbind(italy_geo, Borgocarbonara)
+
+# Centro Valle Intelvi
+Centro_Valle_Intelvi <- data.frame(comune = "centro valle intelvi", lng = 9.0818, lat = 45.9686)
+italy_geo <- rbind(italy_geo, Centro_Valle_Intelvi)
+
+# Piadena Drizzona
+Piadena_Drizzona <- data.frame(comune = "piadena drizzona", lng = 10.3694, lat = 45.1275)
+italy_geo <- rbind(italy_geo, Piadena_Drizzona)
+
+
+
+# ignoti
+
+# Castelgerundo
+Castelgerundo <- data.frame(comune = "castelgerundo", lng = 9.7429, lat = 45.1907)
+italy_geo <- rbind(italy_geo, Castelgerundo)
+
+# Pedesina
+Lombardia <- subset(Lombardia, NOME_COMUNE != 'pedesina')
+comuni_ANPR <- subset(comuni_ANPR, Comune != 'PEDESINA')
+
+
+remove(Cadrezzate_con_Osmate, Solbiate_con_Cagno, Vermezzo_con_Zelo, Colli_Verdi, Valvarrone,
+       Borgo_Mantovano, Borgocarbonara, Centro_Valle_Intelvi, Piadena_Drizzona, Castelgerundo)
+```
+
+
+
+
+Aggiunta latitudine e longitudine al dataset della Lombardia:
+
+```{r}
+italy_geo <- inner_join(italy_geo, Lombardia[,c(5)],
+                            by = c("comune" = "NOME_COMUNE"))
+italy_geo %>% group_by(comune) %>% summarise(lng = first(lng), lat = first(lat)) -> italy_geo
+```
+
+
+
+Selezione dei primi 3 mesi:
+
+```{r}
+Lombardia %>% separate(GE, into=c("MESE", "GIORNO"), sep=2, convert=T, remove=F) -> Lombardia
+Lombardia <- select(filter(Lombardia, MESE <= 3),
+                    c(1:29))
+```
+
+
+
+# Stima dell'incremento di decessi nei comuni con dati noti
+
+Calcolo dell'incremento dei decessi nei comuni noti tramite la differenza tra i decessi nel 2020 e la media degli anni precedenti. Si è deciso di calcolare anche l'incertezza di questa media con un intervallo di confidenza al 95%.
+
+```{r}
+
+comuni_noti <- select(filter(Lombardia, TOTALE_20 < 9999), c(1:29))
+comuni_noti <- comuni_noti %>% gather(key = "SESSO_ANNO", value = "DECESSI", MASCHI_15:TOTALE_20)
+comuni_noti %>% separate(SESSO_ANNO, c("SESSO", "ANNO"), "_") -> comuni_noti
+comuni_noti <- select(filter(comuni_noti, SESSO != "TOTALE"), c(1:14))
+comuni_noti %>% group_by(NOME_COMUNE, ANNO) %>% summarise(DECESSI = sum(DECESSI)) -> comuni_noti
+
+comuni_noti2020 <- select(filter(comuni_noti, ANNO == "20"), c(1:3))
+comuni_noti1519 <- setdiff(comuni_noti, comuni_noti2020)
+
+comuni_noti1519 %>% group_by(NOME_COMUNE) %>% summarise(DECESSI_MEDI = mean(DECESSI), INCERTEZZA = 1.96 * sd(DECESSI) / sqrt(5-1)) -> comuni_noti1519
+```
+
+
+# Stima dei decessi nei comuni non iscritti all'ANPR
+
+Preparazione dataframe ANPR:
+
+```{r}
+#Selezione dei comuni lombardi iscritti ad ANPR prima del 1/1/2020
+
+comuni_ANPR %>% mutate(data = as.Date(comuni_ANPR$'Data subentro', format="%d/%m/%Y")) -> comuni_ANPR
+
+comuni_ANPR <- select(filter(comuni_ANPR, data < "2020-01-01"), c(1,5))
+comuni_ANPR <- select(filter(comuni_ANPR, Regione == "LOMBARDIA"), c(1,2))
+
+
+comuni_ANPR <- mutate(comuni_ANPR, Comune = stri_trans_tolower(Comune))
+```
+
+
+
+Creazione del dataset comuni_noANPR tramite la differenza tra l'elenco dei comuni nella Lombardia e quelli iscritti all'ANPR.
+
+```{r}
+comuni_noANPR <- as.data.frame(setdiff(Lombardia$NOME_COMUNE, comuni_ANPR$Comune))
+names(comuni_noANPR) <- c("NOME_COMUNE")
+#comuni_noANPR <- inner_join(Lombardia, lista_comuni_noANPR, by = c("NOME_COMUNE" = "setdiff(Lombardia$NOME_COMUNE, comuni_ANPR$Comune)"))
+
+
+#comuni_noANPR <- comuni_noANPR %>% gather(key = "SESSO_ANNO", value = "DECESSI", MASCHI_15:TOTALE_20)
+#comuni_noANPR %>% separate(SESSO_ANNO, c("SESSO", "ANNO"), "_") -> comuni_noANPR
+#comuni_noANPR <- select(filter(comuni_noANPR, ANNO != "20"), c(1:14))
+#comuni_noANPR <- select(filter(comuni_noANPR, SESSO != "TOTALE"), c(1:14))
+comuni_noANPR %>% group_by(NOME_COMUNE) %>% summarise() -> comuni_noANPR
+```
+
+
+Sono stati uniti i dataframe con i comuni noti contenenti la media dei decessi dal 2015 al 2019 con la relativa incertezza ed il numero di decessi avvenuti nel 2020.
+
+```{r}
+eccesso_noti <- merge(comuni_noti1519, comuni_noti2020, by = 'NOME_COMUNE')[,c(1,2,3,5)]
+colnames(eccesso_noti)[4] <- "DECESSI_20"
+eccesso_noti <- mutate(eccesso_noti, INCREMENTO = DECESSI_20 - DECESSI_MEDI)
+```
+
+
+Sostituzione di San Giorgio di Mantova con San Giorgio Bigarello (nuovo nome):
+
+```{r}
+popolazione_comuni_italiani[popolazione_comuni_italiani == "San Giorgio di Mantova"] <- "San Giorgio Bigarello"
+```
+
+
+
+
+è stato poi aggiunto il dato realtivo alla popolazione di ogni comune al dataframe precedentemente creato per poter calcolare l'incremento relativo di decessi sulla popolazione rispetto agli anni precedenti e la relativa incertezza.
+
+```{r}
+popolazione_comuni_italiani <- mutate(popolazione_comuni_italiani,
+                                      Territorio = stri_trans_tolower(Territorio))
+popolazione_comuni_italiani <- select(filter(popolazione_comuni_italiani, Sesso == "totale"), c(2,13))
+
+popolazione_comuni_italiani %>% group_by(Territorio) %>% summarise(Value = mean(Value)) -> popolazione_comuni_italiani
+
+eccesso_noti <- inner_join(eccesso_noti, popolazione_comuni_italiani, by = c("NOME_COMUNE" = "Territorio"))
+
+eccesso_noti["INCR_RELATIVO"] <- eccesso_noti["INCREMENTO"] / eccesso_noti["Value"]
+eccesso_noti['INCERTEZZA_REL'] <- eccesso_noti["INCERTEZZA"] / eccesso_noti["Value"]
+```
+
+
+
+Si è deciso di iniziare a stimare il numero di decessi nel 2020 per i comuni non appartenenti all'ANPR.
+Per fare ciò si è supposto che l'incremento percentuale dei decessi nei comuni limitrofi fosse simile rispetto a quello del comune ignoto. 
+Per poter selezionare i comuni vicini, si è scelto di stabilire un raggio di 10km e le posizioni geografiche di ciascun comune sono state ricavate scaricando un ulteriore dataframe contenente la latitudine e la longitudine per comune.
+Le distanze tra i comuni sono state calcolate tramite una matrice che tenesse conto della latitudine e della longitudine dei comuni. Siccome calcolare le distanze tra tutti i comuni sarebbe stato eccessivo, si è deciso di calcolare unicamente le distanze tra i comuni noANPR(nelle colonne) ed i comuni noti(nelle righe).
+Dopo aver selezionato i comuni vicini, la stima dei decessi nel comune noANPR, è stata calcolata come media degli incrementi percentuali dei comuni vicini (e così anche la relativa incertezza).
+
+
+
+
+Matrice delle distanze (in metri) noti-noANPR:
+
+```{r}
+italy_geo_noti <- inner_join(italy_geo, comuni_noti, by = c("comune" = "NOME_COMUNE"))[c(1:3)]
+italy_geo_noti %>% group_by(comune) %>% summarise(lng = first(lng), lat = first(lat)) -> italy_geo_noti
+
+italy_geo_noANPR <- inner_join(italy_geo, comuni_noANPR, by = c("comune" = "NOME_COMUNE"))[c(1:3)]
+italy_geo_noANPR %>% group_by(comune) %>% summarise(lng = first(lng), lat = first(lat)) -> italy_geo_noANPR
+
+
+
+myList1 <- setNames(split(italy_geo_noti[,c(2,3)], seq_len(nrow(italy_geo_noti))),
+                    italy_geo_noti$comune)
+myList2 <- setNames(split(italy_geo_noANPR[,c(2,3)], seq_len(nrow(italy_geo_noANPR))),
+                    italy_geo_noANPR$comune)
+
+#mat_noti_noANPR <- outer(myList1, myList2, Vectorize(distHaversine))
+
+remove(myList1, myList2)
+```
+
+  
+
+```{r}
+# Comparazione timing per selezionare il metodo di sorting più efficiente
+
+prova <- mat_noti_noANPR[,"abbiategrasso"]
+
+bench <- microbenchmark::microbenchmark(times = 1000,
+  baseR        = {prova[sort.list(prova, na.last = NA), drop = FALSE]},
+  baseR_quick  = {prova[sort.list(prova, na.last = NA, method = "quick"), drop = FALSE]},
+  dplyr        = {arrange(as.data.frame(prova))}
+)
+boxplot(bench)
+
+# Il metodo più veloce risulta essere quello baseR
+```
+
+```{r}
+comuni_vicini <- vector("list")
+
+for(j in 1:nrow(italy_geo_noANPR)) {
+  distanze <- mat_noti_noANPR[,j]
+  distanze <- distanze[sort.list(distanze)]
+
+  vicini = character()
+  i=1
+  for(i in 1:length(distanze)) {
+    if(distanze[[i]] < 10000) {vicini <- c(vicini, names(distanze)[i])}
+    else {break}
+    i=i+1
+  }
+  
+  a <- italy_geo_noANPR[j,"comune"]
+  comuni_vicini[[as.character(a)]] <- vicini
+}
+
+remove(distanze, i, j, a, vicini)
+```
+
+
+
+Sostituzione nomi comuni a causa di cambiamenti nel corso del tempo:
+
+```{r}
+# Cadrezzate con Osmate
+Cadrezzate_con_Osmate <- data.frame("cadrezzate con osmate",
+                                    popolazione_comuni_italiani[1030, "Value"] +
+                                      popolazione_comuni_italiani[4770, "Value"])
+names(Cadrezzate_con_Osmate) <- c("Territorio", "Value")
+popolazione_comuni_italiani <- rbind(popolazione_comuni_italiani, Cadrezzate_con_Osmate)
+
+# Vermezzo con Zelo
+Vermezzo_con_Zelo <- data.frame("vermezzo con zelo",
+                                    popolazione_comuni_italiani[7627, 2] +
+                                      popolazione_comuni_italiani[7922, 2])
+names(Vermezzo_con_Zelo) <- c("Territorio", "Value")
+popolazione_comuni_italiani <- rbind(popolazione_comuni_italiani, Vermezzo_con_Zelo)
+
+# Gornate Olona
+popolazione_comuni_italiani[popolazione_comuni_italiani == "gornate-olona"] <- "gornate olona"
+
+# Puegnago del Garda
+popolazione_comuni_italiani[popolazione_comuni_italiani == "puegnago sul garda"] <- "puegnago del garda"
+
+
+remove(Cadrezzate_con_Osmate, Vermezzo_con_Zelo)
+```
+
+Aggiunta popolazione comuni noANPR:
+
+```{r}
+comuni_noANPR <- inner_join(comuni_noANPR, popolazione_comuni_italiani, by = c("NOME_COMUNE" = "Territorio"))
+names(comuni_noANPR) <- c("comune", "Value")
+#comuni_noANPR["INCR_RELATIVO"] <- comuni_noANPR["INCREMENTO"] / comuni_noANPR["Value"]
+```
+
+Stima decessi e incertezza nei comuni noANPR:
+
+```{r}
+
+lista_comuni <- names(comuni_vicini)
+num_comuni <- length(lista_comuni)
+
+stima <- rep.int(0,num_comuni)
+incertezza <- stima
+
+for(i in 1:num_comuni) {
+  comune <- lista_comuni[i]
+  vicini <- comuni_vicini[[as.character(comune)]]
+  num_vicini <- length(vicini)
+  
+  if(num_vicini > 0) {
+    for(j in 1:num_vicini) {
+      pos <- which(eccesso_noti['NOME_COMUNE'] == vicini[j])
+      stima[i] <- stima[i] + eccesso_noti[pos, 'INCR_RELATIVO']
+      incertezza[i] <- incertezza[i] + eccesso_noti[pos, 'INCERTEZZA_REL']
+    }
+    
+    stima[i] <- stima[i] / num_vicini
+    incertezza[i] <- incertezza[i] / num_vicini
+    
+  } else {
+    stima[i] = 0
+    incertezza[i] = 0
+  }
+}
+
+#comuni_noANPR['media_incr'] <- stima
+#comuni_noANPR['incertezza_incr'] <- incertezza
+
+comuni_noANPR['decessi2020'] <- stima * comuni_noANPR['Value']
+comuni_noANPR['incertezza'] <- incertezza * comuni_noANPR['Value']
+
+remove(num_comuni, stima, comune, i, j, incertezza, lista_comuni, num_vicini, pos, vicini)
+```
+
+
+
+
+#Stima dei comuni ignoti
+
+
+è stata poi ricavata la lista dei comuni ignoti (aventi un incremento dei decessi inferiore al 20% o con dati non disponibili) sottraendo alla lista dei comuni ANPR quelli i cui dati erano disponibili nel 2020:
+
+
+```{r}
+comuni_ignoti <- as.data.frame(setdiff(comuni_ANPR$Comune, comuni_noti2020$NOME_COMUNE))
+
+comuni_ignoti <- inner_join(Lombardia, comuni_ignoti,
+                            by = c("NOME_COMUNE" =
+                                     "setdiff(comuni_ANPR$Comune, comuni_noti2020$NOME_COMUNE)"))
+
+comuni_ignoti['NOME_COMUNE'] %>% group_by(NOME_COMUNE) %>% summarise() -> comuni_ignoti
+```
+
+
+
+è stata poi creata la matrice delle distanze tra i comuni ignoti(sulle colonne) e gli ANPR (sulle righe) dopo aver aggiunto i relativi dati di posizione.
+
+```{r}
+italy_geo_ANPR <- inner_join(italy_geo, comuni_ANPR['Comune'], by = c("comune" = "Comune"))[c(1:3)]
+
+italy_geo_ignoti <- inner_join(italy_geo, comuni_ignoti, by = c("comune" = "NOME_COMUNE"))[c(1:3)]
+
+
+myList1 <- setNames(split(italy_geo_ANPR[,c(2,3)], seq_len(nrow(italy_geo_ANPR))),
+                    italy_geo_ANPR$comune)
+myList2 <- setNames(split(italy_geo_ignoti[,c(2,3)], seq_len(nrow(italy_geo_ignoti))),
+                    italy_geo_ignoti$comune)
+
+#mat_ignoti_ANPR <- outer(myList1, myList2, Vectorize(distHaversine))
+
+remove(myList1, myList2)
+```
+
+Nel dataset dell'ISTAT, quando i dati per il 2020 non sono disponibili, significa che presentano un incremento dei decessi inferiore al 20% rispetto alla media degli anni precedenti oppure che non hanno comunicato i dati perchè ritenuti inaffidabili.
+Per poter distinguere queste due categorie si è deciso di tener conto dei dati dei comuni vicini. In particolare si è deciso di classificare come "comune sotto al 20%", i comuni con la maggior parte dei vicini aventi dati mancanti e come "dati non disponibili" i comuni con la maggior parte dei vicini aventi dati noti.
+
+Questo perchè si è ipotizzato che:
+\begin{itemize}
+\item se un comune ha per la maggior parte vicini con dati noti, è probabile che anch'esso abbia avuto un incremento di decessi superiore al 20% ma che abbia avuto dati rituenuti inaffidabili
+\item se un comune ha in prevalenza vicini con dati non disponibili, è probabile che quella zona sia stata poco colpita dal virus e che quindi ci sia stato un incremento di decessi inferiore al 20%
+\end{itemize}
+
+```{r}
+classificazione <- rep.int(0,nrow(italy_geo_ignoti))
+
+lista_comuni_ignoti <- comuni_ignoti[['NOME_COMUNE']]
+
+for(j in 1:nrow(italy_geo_ignoti)) {
+  distanze <- mat_ignoti_ANPR[,j]
+  distanze <- distanze[sort.list(distanze)]
+
+  vicini = character()
+  i=1
+  for(i in 1:length(distanze)) {
+    if(distanze[[i]] < 10000) {vicini <- c(vicini, names(distanze)[i])}
+    else {break}
+    i=i+1
+  }
+  
+  
+  a <- 0
+  i <- 1
+  if(length(vicini) > 0) {
+    for(i in 1:length(vicini)) {
+      if(vicini[i] %in% lista_comuni_ignoti) a <- a - 1
+      else a <- a + 1
+    }
+  }
+  
+  
+  # se a è positivo, prevalgono i vicini noti e il comune è classificato come un comune che non ha
+  # comunicato i dati
+  
+  # se a è negativo, come un comune sotto al 20%
+  
+  if(a > 0) classificazione[j] <- "dati non disponibili"
+  else classificazione[j] <- "sotto al 20%"
+}
+
+
+comuni_ignoti['CLASSIFICAZIONE'] <- classificazione
+
+summary(as.factor(classificazione))
+
+remove(distanze, a, i, j, vicini, classificazione, lista_comuni_ignoti)
+```
+
+Dei 497 comuni con dati mancanti, 351 sono stati classificati come comuni con un incremento inferiore al 20% e 146 come comuni con un incremento superiore ma dati inaffidabili.
+
+Si è deciso quindi di trattare le due categorie in due modi diversi.
+
+
+#Stima dei comuni "non disponibili"
+
+Per i comuni classificati come "dati non disponibili", è stato applicato lo stesso calcolo effettuato in precedenza, è stata quindi calcolata la media degli incrementi dei decessi (in percentuale sulla popolazione) nei comuni limitrofi  
+
+
+```{r}
+nondisp <- select(filter(comuni_ignoti, CLASSIFICAZIONE == 'dati non disponibili'), c(1))
+italy_geo_nondisp <- inner_join(italy_geo, nondisp, by = c("comune" = "NOME_COMUNE"))[c(1:3)]
+italy_geo_nondisp %>% group_by(comune) %>% summarise(lng = first(lng), lat = first(lat)) -> italy_geo_nondisp
+
+
+
+myList1 <- setNames(split(italy_geo_noti[,c(2,3)], seq_len(nrow(italy_geo_noti))),
+                    italy_geo_noti$comune)
+myList2 <- setNames(split(italy_geo_nondisp[,c(2,3)], seq_len(nrow(italy_geo_nondisp))),
+                    italy_geo_nondisp$comune)
+
+#mat_noti_nondisp <- outer(myList1, myList2, Vectorize(distHaversine))
+
+remove(myList1, myList2)
+```
+
+```{r}
+comuni_ignoti <- inner_join(comuni_ignoti, popolazione_comuni_italiani, by = c("NOME_COMUNE" = "Territorio"))
+```
+
+```{r}
+
+lista_comuni_nondisp <- as.vector(comuni_ignoti[which(comuni_ignoti['CLASSIFICAZIONE'] == "dati non disponibili"),"NOME_COMUNE"])
+lista_comuni_nondisp <- lista_comuni_nondisp[['NOME_COMUNE']]
+num_comuni_nondisp <- sum(comuni_ignoti['CLASSIFICAZIONE'] == "dati non disponibili")
+
+
+
+
+comuni_vicini2 <- vector("list")
+
+for(j in 1:nrow(italy_geo_nondisp)) {
+  distanze <- mat_noti_nondisp[,j]
+  distanze <- distanze[sort.list(distanze)]
+
+  vicini = character()
+  i=1
+  for(i in 1:length(distanze)) {
+    if(distanze[[i]] < 10000) {vicini <- c(vicini, names(distanze)[i])}
+    else {break}
+    i=i+1
+  }
+  
+  a <- italy_geo_nondisp[j,"comune"]
+  comuni_vicini2[[as.character(a)]] <- vicini
+}
+
+remove(distanze, i, j, a, vicini)
+
+
+
+
+stima <- rep.int(0,nrow(comuni_ignoti))
+incertezza <- stima
+
+for(i in 1:nrow(comuni_ignoti)) {
+  comune <- comuni_ignoti[i,'NOME_COMUNE']
+  if(comune %in% lista_comuni_nondisp) {
+    
+    vicini <- comuni_vicini2[[as.character(comune)]]
+    num_vicini <- length(vicini)
+    
+    if(num_vicini > 0) {
+      for(j in 1:num_vicini) {
+        pos <- which(eccesso_noti['NOME_COMUNE'] == vicini[j])
+        stima[i] <- stima[i] + eccesso_noti[pos, 'INCR_RELATIVO']
+        incertezza[i] <- incertezza[i] + eccesso_noti[pos, 'INCERTEZZA_REL']
+      }
+    
+      stima[i] <- stima[i] / num_vicini
+      incertezza[i] <- incertezza[i] / num_vicini
+      
+    } else {
+      stima[i] = 0
+      incertezza[i] = 0
+    }
+  }
+}
+
+#comuni_noANPR['media_incr'] <- stima
+#comuni_noANPR['incertezza_incr'] <- incertezza
+
+comuni_ignoti['decessi2020'] <- stima * comuni_ignoti['Value']
+comuni_ignoti['incertezza2020'] <- incertezza * comuni_ignoti['Value']
+
+remove(stima, comune, i, j, incertezza, num_vicini, pos, vicini, num_comuni_nondisp)
+```
+
+
+#Stima dei comuni sotto al 20%
+
+Per i comuni classificati come "sotto al 20%" si è scelto di utilizzare per il 2020 la media dei decessi avvenuti negli anni precedenti incrementata del 10%.
+Per definire l'incertezza di questo dato, si è ipotizzato che essi abbiano un'incertezza casuale con distribuzione normale centrata su 10% e deviazione standard tale che l'intervallo di confidenza al 99% coincida con l'intervallo (0%,20%)
+
+
+Stima dei comuni sotto al 20% attribuendo una percentuale di 10%:
+
+```{r}
+comuni_ignoti1519 <- select(filter(Lombardia, DATA_INIZIO_DIFF == 'Dati 2020 n.d.'), c(1:29))
+comuni_ignoti1519 <- inner_join(comuni_ignoti1519, comuni_ANPR['Comune'], by = c("NOME_COMUNE" = "Comune"))
+comuni_ignoti1519 <- comuni_ignoti1519 %>% gather(key = "SESSO_ANNO", value = "DECESSI", MASCHI_15:TOTALE_20)
+comuni_ignoti1519 %>% separate(SESSO_ANNO, c("SESSO", "ANNO"), "_") -> comuni_ignoti1519
+comuni_ignoti1519 <- select(filter(comuni_ignoti1519, SESSO != "TOTALE"), c(1:14))
+comuni_ignoti1519 <- select(filter(comuni_ignoti1519, ANNO != "20"), c(1:14))
+comuni_ignoti1519 %>% group_by(NOME_COMUNE, ANNO) %>% summarise(DECESSI = sum(DECESSI)) -> comuni_ignoti1519
+
+
+
+comuni_ignoti1519 %>% group_by(NOME_COMUNE) %>% summarise(DECESSI_MEDI = mean(DECESSI), INCERTEZZA = 1.96 * sd(DECESSI) / sqrt(5-1)) -> comuni_ignoti1519
+
+
+comuni_ignoti["DECESSI_MEDI_1519"] <- comuni_ignoti1519["DECESSI_MEDI"]
+comuni_ignoti["INCERTEZZA_1519"] <- comuni_ignoti1519["INCERTEZZA"]
+```
+
+Incertezza:
+```{r}
+sigma <- 0.1 / 2.58
+
+pos <- comuni_ignoti["CLASSIFICAZIONE"] == "sotto al 20%"
+
+comuni_ignoti[pos, "decessi2020"] <- comuni_ignoti[pos, "DECESSI_MEDI_1519"] * 1.1
+comuni_ignoti[pos, "incertezza2020"] <- comuni_ignoti[pos, "INCERTEZZA_1519"] * sigma
+
+remove(pos, sigma)
+```
+
+
+
+Dall'analisi risulta che il numero di decessi avvenuti in Lombardia nel 2020 è di 36164 ± 8670.
+Si è quindi stimato un incremento di decessi pari a 17075 ± 4405 rispetto alla media degli anni precedenti.
+
+
+```{r}
+Incremento2020 <- sum(eccesso_noti$INCREMENTO) + sum(comuni_ignoti$decessi2020) + sum(comuni_noANPR$decessi2020)
+Incertezza2020 <- sum(eccesso_noti$INCERTEZZA) + sum(comuni_ignoti$incertezza2020) + sum(comuni_noANPR$incertezza)
+
+
+decessi_noti <- sum(eccesso_noti$INCREMENTO)
+decessi_ignoti <- sum(comuni_ignoti$decessi2020)
+decessi_noANPR <- sum(comuni_noANPR$decessi2020)
+
+
+
+
+
+Decessi1519 <- Lombardia
+Decessi1519 <- select(filter(Decessi1519, (MESE <3)), c(1:29))
+Decessi1519 <- Decessi1519 %>% gather(key = "SESSO_ANNO", value = "DECESSI", MASCHI_15:TOTALE_20)
+Decessi1519 %>% separate(SESSO_ANNO, c("SESSO", "ANNO"), "_") -> Decessi1519
+Decessi1519 <- select(filter(Decessi1519, SESSO != "TOTALE"), c(1:14))
+Decessi1519 <- select(filter(Decessi1519, ANNO != "20"), c(5,13,14))
+Decessi1519 %>% group_by(NOME_COMUNE, ANNO) %>% summarise(DECESSI = sum(DECESSI)) -> Decessi1519
+
+
+
+Decessi1519 %>% group_by(NOME_COMUNE) %>% summarise(DECESSI_MEDI = mean(DECESSI), INCERTEZZA = 1.96 * sd(DECESSI) / sqrt(5-1)) -> Decessi1519
+
+Totale_Decessi_1519=sum(Decessi1519$DECESSI_MEDI)
+
+Totale_Incertezza_1519=sum(Decessi1519$INCERTEZZA)
+
+Totale_Decessi_2020=Incremento2020+Totale_Decessi_1519
+Totale_Incertezza_2020=Incertezza2020+Totale_Incertezza_1519
+
+```
+
+```{r}
+dataset_aggiornato <- select(filter(dataset_aggiornato, NOME_REGIONE == "Lombardia"), c(5,7,8,9))
+
+dataset_aggiornato["01/01-31/03"] <- dataset_aggiornato[2] + dataset_aggiornato[3] + dataset_aggiornato[4]
+
+Decessi_ufficiali_2020 <- sum(dataset_aggiornato$`01/01-31/03`)
+  
+```
+
+
+Confronto tra Media 15/19 e Stima 20:
+```{r}
+vettoredecessi=c(Totale_Decessi_2020,Totale_Decessi_1519)
+vettoreincertezza=c(Totale_Incertezza_2020,Totale_Incertezza_1519)
+
+Tipi=c("Stima 20","Media 15/19")
+
+Plot <-data.frame(Tipi,vettoreincertezza)
+
+
+ggplot(Plot) +
+  geom_bar( aes(x=reorder(Tipi, vettoreincertezza), y=vettoredecessi), stat="identity", fill="red", alpha=0.6, width=0.6) +
+  geom_errorbar( aes(x=Tipi, ymin=vettoredecessi-vettoreincertezza, ymax=vettoredecessi+vettoreincertezza), width=0.2, colour="lightblue", alpha=0.9, size=1.5) +
+  ggtitle("Confronto tra Media 15/19 e Stima 20") +  coord_cartesian(ylim = c(85, 55000))+
+  xlab("") +
+  ylab("Decessi")+annotate("text", x = "Media 15/19", y =25550, label = "±4405",size=4) +annotate("text", x = "Stima 20", y =47100, label = "±8670",size=4)+coord_flip()
+```
+
+
+
+Confronto tra Stima e Dati Ufficiali 2020:
+```{r}
+vettoredecessi=c(Decessi_ufficiali_2020,Totale_Decessi_2020)
+vettoreincertezza=c(NA,Totale_Incertezza_2020)
+
+Tipi=c("Ufficiali","Stimati")
+
+StimaUfficiali <-data.frame(Tipi,vettoreincertezza)
+
+
+
+
+
+ggplot(StimaUfficiali) +
+  geom_bar( aes(x=reorder(Tipi, -vettoreincertezza), y=vettoredecessi), stat="identity", fill="forestgreen", alpha=0.5, width=0.6) +
+  geom_errorbar( aes(x=Tipi, ymin=vettoredecessi-vettoreincertezza, ymax=vettoredecessi+vettoreincertezza), width=0.2, colour="orange", alpha=1.5, size=1.5) +
+  ggtitle("Confronto tra Stima e Dati Ufficiali 2020") +  coord_cartesian(ylim = c(85, 55000))+
+  xlab("") +
+  ylab("Decessi")+annotate("text", x = "Stimati", y =47100, label = "±8670",size=4)+coord_flip()
+```
+
