@@ -1,4 +1,4 @@
-# CovidProject
+# Mortality in Lombardy before and after Covid19
 
 To VISUALIZE the REPORT of the work:
 
