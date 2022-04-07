@@ -11,3 +11,5 @@ This project aims to predict the number of death in Lombardy for the first quart
 For the analysis, have been used data from the ISTAT dataset.
 
 Graphics are done using Tableau
+
+![This is an image](https://github.com/mattiaventola/CovidProject/blob/main/lombardyanalysis.jpg)
